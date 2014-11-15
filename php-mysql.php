@@ -249,6 +249,8 @@
 			if (!$result){
 				if ($show_error){
 					echo "Error querying database. : $query<br/>";
+					//2014-11-15 Add return last MySQL error, for debugging purpose
+					echo "Error: ".mysqli_error($conn)."<br/>"; 
 				}
 			}
 			else{

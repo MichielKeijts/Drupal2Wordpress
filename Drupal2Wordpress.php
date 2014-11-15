@@ -61,6 +61,8 @@
 	$drupal_taxonomy = $dc->results("SELECT DISTINCT d.tid AS term_id, 'post_tag' AS post_tag, d.description AS description, h.parent AS parent FROM ".$DB_DRUPAL_PREFIX."taxonomy_term_data d INNER JOIN ".$DB_DRUPAL_PREFIX."taxonomy_term_hierarchy h ON (d.tid = h.tid) ORDER BY 'term_id' ASC");
 	foreach($drupal_taxonomy as $dt)
 	{
+		// Workaround, as WP Field description cannot be NULL
+		if (empty($dt['description'])) $dt['description']=""; 
 		$wc->query("INSERT INTO ".$DB_WORDPRESS_PREFIX."term_taxonomy (term_id, taxonomy, description, parent) VALUES ('%s','%s','%s','%s')", $dt['term_id'], $dt['post_tag'], $dt['description'], $dt['parent']);
 	}
 
@@ -77,7 +79,8 @@
 	if (!empty($row['term_id'])) {
 		$blog_term_id = $row['term_id'];
 
-		$wc->query("INSERT INTO ".$DB_WORDPRESS_PREFIX."term_taxonomy (term_id, taxonomy) VALUES ('%d','%s')", $blog_term_id, 'category');
+		// Workaround, added WP Field description as it cannot be NULL
+		$wc->query("INSERT INTO ".$DB_WORDPRESS_PREFIX."term_taxonomy (term_id, taxonomy, description) VALUES ('%d','%s','%s')", $blog_term_id, 'category', '');
 
 	}
 
@@ -104,7 +107,18 @@
 		else 
 			$post_type = 'page';
 
-		$wc->query("INSERT INTO ".$DB_WORDPRESS_PREFIX."posts (id, post_author, post_date, post_date_gmt, post_content, post_title, post_excerpt, post_type, post_status) VALUES ('%s','%s','%s','%s','%s','%s','%s','%s','%s')", $dp['id'], $dp['post_author'], $dp['post_date'], $dp['post_date'], $dp['post_content'], $dp['post_title'], $dp['post_excerpt'], $post_type, $dp['post_status']);
+		
+		// Drupal Stores the links to images into the /sites/default/files/ directory
+		// Within Wordpress this has to change to /wp-content/uploads/ 
+		// SQL: 
+		//	REPLACE(r.body_value, '/sites/default/files/',		'/wp-content/uploads/')
+		//	REPLACE(r.body_summary, '/sites/default/files/',	'/wp-content/uploads/')
+		// PHP:
+		$dp['post_content']=str_replace($dp['post_content'], '/sites/default/files/',		'/wp-content/uploads/');
+		$dp['post_excerpt']=str_replace($dp['post_excerpt'], '/sites/default/files/',		'/wp-content/uploads/');
+		
+		// 2014-11-15 Added field `post_content_filtered`, `to_ping`  and `pinged` as it cannot be NULL
+		$wc->query("INSERT INTO ".$DB_WORDPRESS_PREFIX."posts (id, post_author, post_date, post_date_gmt, post_content, post_title, post_excerpt, post_type, post_status, to_ping,pinged, post_content_filtered) VALUES ('%s','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s')", $dp['id'], $dp['post_author'], $dp['post_date'], $dp['post_date'], $dp['post_content'], $dp['post_title'], $dp['post_excerpt'], $post_type, $dp['post_status'],'','','');
 
 		// Attach all posts to the Blog category we created earlier
 		if ($blog_term_id !== 0) {
