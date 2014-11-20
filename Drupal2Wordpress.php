@@ -8,16 +8,26 @@
 	//Wordpress Database Name, Username and Password
 	$DB_WP_USERNAME	= 'root';
 	$DB_WP_PASSWORD	= 'root';
-	$DB_WORDPRESS	= 'robin_wordpress';
+	$DB_WORDPRESS	= 'wordpress';
 
 	//Drupal Database Name, Username and Password
 	$DB_DP_USERNAME	= 'root';
 	$DB_DP_PASSWORD	= 'root';
-	$DB_DRUPAL		= 'robin_drupal';
+	$DB_DRUPAL		= 'drupal';
 
 	//Table Prefix
 	$DB_WORDPRESS_PREFIX = 'wp_';
 	$DB_DRUPAL_PREFIX	 = '';
+	
+	// Image dir (relative to root of drupal, with trailing /
+	// default: 
+	// $DRUPAL_IMG_DIR	=	'/sites/default/files/';
+	$DRUPAL_IMG_DIR	=	'/sites/default/files/';
+	
+	// Wordpress Site URI to image dir with trailing /
+	// default: 
+	// $WP_SITE_URI		=	'http://www.yourdomain.ext/wp-content/uploads/';
+	$WP_SITE_URI	=	'http://wordpress/wp-content/uploads/';
 
 	//Create Connection Array for Drupal and Wordpress
 	$drupal_connection		= array("host" => "localhost","username" => $DB_DP_USERNAME,"password" => $DB_DP_PASSWORD,"database" => $DB_DRUPAL);
@@ -101,8 +111,10 @@
 		// For the sake of supporting out of the box seamless migration we will
 		// assume that any Drupal 'article' content type should be a Wordpress
 		// 'post' type and anything else will be set to 'page'
+		
+		// 2014-11-18 Added option 'blog', which is essentially the same as a article
 
-		if ($dp['post_type'] === 'article')
+		if ($dp['post_type'] === 'article' || $dp['post_type']=='blog')
 			$post_type = 'post';
 		else 
 			$post_type = 'page';
@@ -114,8 +126,9 @@
 		//	REPLACE(r.body_value, '/sites/default/files/',		'/wp-content/uploads/')
 		//	REPLACE(r.body_summary, '/sites/default/files/',	'/wp-content/uploads/')
 		// PHP:
-		$dp['post_content']=str_replace($dp['post_content'], '/sites/default/files/',		'/wp-content/uploads/');
-		$dp['post_excerpt']=str_replace($dp['post_excerpt'], '/sites/default/files/',		'/wp-content/uploads/');
+		//	$DRUPAL_IMG_DIR is defined
+		$dp['post_content']=str_replace($DRUPAL_IMG_DIR, '/wp-content/uploads/', $dp['post_content']);
+		$dp['post_excerpt']=str_replace($DRUPAL_IMG_DIR, '/wp-content/uploads/', $dp['post_excerpt']);
 		
 		// 2014-11-15 Added field `post_content_filtered`, `to_ping`  and `pinged` as it cannot be NULL
 		$wc->query("INSERT INTO ".$DB_WORDPRESS_PREFIX."posts (id, post_author, post_date, post_date_gmt, post_content, post_title, post_excerpt, post_type, post_status, to_ping,pinged, post_content_filtered) VALUES ('%s','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s')", $dp['id'], $dp['post_author'], $dp['post_date'], $dp['post_date'], $dp['post_content'], $dp['post_title'], $dp['post_excerpt'], $post_type, $dp['post_status'],'','','');
@@ -309,7 +322,103 @@ foreach ($drupal_comments_level12 as $dcl12)
 	}
 
 	message('Users Updated');
-
+	
+	
+	
+	// Try to Update Drupal Image fields, when created
+	// NB it is necessary to know a priori what table names are used for the images in the Drupal database
+	//	1- find first the table with the image information (unlimitted supported, in principle, but not tested
+	//	2- select all data from the image table
+	//	3- copy all image data in the wp_posts table. 
+	//	3a	- insert one image int the wp_posts table and associate entity_id with post_id
+	//	3b	- insert in the postmeta table the information of the image
+	//	
+	//	assumed: 
+	//	-	DRUPAL_IMG_DIR ('/sites/all/files/');
+	//	
+	//	First, make post-format-image and post-format-gallery available in database table
+	$wc->query("INSERT INTO ".$DB_WORDPRESS_PREFIX."terms (name, slug, term_group) VALUES	('post-format-gallery','post-format-gallery',0)");
+	$wc->query("INSERT INTO ".$DB_WORDPRESS_PREFIX."terms (name, slug, term_group) VALUES	('post-format-image','post-format-image',0)");
+	$wc->query("INSERT INTO ".$DB_WORDPRESS_PREFIX."term_taxonomy (term_id, taxonomy, description) (SELECT term_id, 'post_format' AS t, '' as description FROM ".$DB_WORDPRESS_PREFIX."terms WHERE name='post-format-gallery' OR name='post-format-image')");
+	
+	
+	// Drupal Image Fields Placeholder
+	$dif_list=array();
+	
+	// find all image fields in Drupal from th field_config table
+	//	-	only use field_sql_storage:	field_config.storage_module='field_sql_storage'  
+	//	-	non-deleted: field_config.deleted=0
+	$drupal_image_fields = $dc->results("select * from $DB_DRUPAL_PREFIX.field_config WHERE `type`='image' AND storage_module='field_sql_storage' AND deleted=0");
+	message(sprintf('Found %d image fields.. ', (int)count($drupal_image_fields)));
+	
+	// try to pass through each image field table
+	foreach($drupal_image_fields as $dif)
+	{
+		// current table for the images
+		$current_img_table=$DB_DRUPAL_PREFIX.'field_data_'.$dif['field_name'];
+		// dealing with images
+		
+		// find all images, where a node link is live (INNER JOIN)
+		// join file information
+		$images=$dc->results("SELECT * FROM {$current_img_table} f "
+				. "INNER JOIN {$DB_DRUPAL_PREFIX}.node n ON n.nid = f.entity_id "
+				. "INNER JOIN {$DB_DRUPAL_PREFIX}.file_managed fm ON fm.fid = f.{$dif['field_name']}_fid "
+				. "ORDER BY entity_id ASC, delta ASC");
+		
+		
+		// Only one thumbnail is allowed per post.
+		// This array holds the used posts
+		$post_thumbs=array();
+		
+		foreach ($images as $di) {
+			// format filename to be used as guid
+			$filename=$WP_SITE_URI.$di['filename'];
+			$id=$wc->insert_and_return_id("INSERT INTO ".$DB_WORDPRESS_PREFIX."posts 
+					(post_author, post_date	, post_date_gmt	, post_modified	, post_modified_gmt	,post_content	, post_title, post_excerpt	, post_parent	, guid				,post_type		, post_mime_type, post_status	, to_ping	,pinged	, post_content_filtered)
+					VALUES
+					('%s'		,'%s'		,'%s'			,'%s'			,'%s'				,'%s'			,'%s'		,'%s'			,'%s'			,'%s'				,'%s'			,'%s'			,'%s'			,'%s'		,'%s'	,'%s')", 
+					$di['uid'], date('Y-m-d H:i:s',$di['timestamp']), gmdate('Y-m-d H:i:s',$di['timestamp']), date('Y-m-d H:i:s',$di['changed']), gmdate('Y-m-d H:i:s',$di['changed']),$di[$dif['field_name'].'_title'], $di['filename'], $di[$dif['field_name'].'_alt'], $di['entity_id'], $filename, 'attachment', $di['filemime'],'inherit','','',''
+			);
+			
+			// INSERT into post_meta table
+			// 
+			// in Wordpress the post_meta saves some information about the image size this is set:
+			//	wp_postmeta table
+			//		-	meta_id		(to be created)
+			//		-	post_id		(from drupal post_id)
+			//		-	meta_key	(2 options: _wp_attached_file OR _wp_attachment_metadata
+			//		-	meta_value	(filename OR serialized width and height)
+			$wc->query("INSERT INTO ".$DB_WORDPRESS_PREFIX."postmeta 
+				(`post_id`, `meta_key`, `meta_value`)
+				 VALUES 
+				('%s','%s','%s')", $id, '_wp_attached_file', $di['filename']);
+			
+			// set layout to inherit
+			$wc->query("INSERT INTO ".$DB_WORDPRESS_PREFIX."postmeta 
+				(`post_id`, `meta_key`, `meta_value`)
+				 VALUES 
+				('%s','%s','%s')", $id, '_layout', 'inherit');
+			
+			// Add thumbnail ID
+			// only one is supported, so only one is used
+			if (!isset($post_thumbs[$di['entity_id']])) {
+				$wc->query("INSERT INTO ".$DB_WORDPRESS_PREFIX."postmeta 
+					(`post_id`, `meta_key`, `meta_value`)
+					 VALUES 
+					('%s','%s','%s')", $di['entity_id'], '_thumbnail_id', $id);
+			}
+			
+			// update post_thumbs
+			$post_thumbs[$di['entity_id']]=true;
+		}
+		message('Updated all '.$dif['field_name'].' values.. (#' .count($images).')');
+	}
+	
+	// update term relationships
+	$wc->query("REPLACE INTO {$DB_WORDPRESS_PREFIX}term_relationships (object_id, term_taxonomy_id) SELECT post_parent, IF(COUNT(post_parent)>1, (SELECT term_id FROM {$DB_WORDPRESS_PREFIX}terms WHERE `name`='post-format-gallery'),(SELECT term_id FROM {$DB_WORDPRESS_PREFIX}terms WHERE `name`='post-format-image')) AS ttid FROM {$DB_WORDPRESS_PREFIX}posts WHERE `post_type`='attachment' AND post_parent>0 GROUP BY post_parent");
+	
+	
+	// pfieww..
 	message('Cheers !!');
 
 	/*

@@ -373,6 +373,28 @@
 				return $row;
 			}
 		}
+		
+		// Executes query and returns affected row count for result set
+		public function insert_and_return_id($sql){
+			$mode = "r";
+			$args = func_get_args();
+			array_shift($args);
+			
+			if (isset($args[0]) and is_array($args[0])){
+				if (!empty($args[1]) && count($args)==2){
+					$mode = $args[1];
+				}				
+				$args = $args[0];
+			}
+			
+			$result = $this->run_query($sql,$args);
+		
+			if ($result){
+				$row = mysqli_insert_id($this->conn);
+				return $row;
+			}
+			return $result;
+		}
 
 		private function string_sanitize($match,$init=FALSE){
 			static $args = NULL;
